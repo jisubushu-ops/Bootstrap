@@ -1,61 +1,63 @@
 name: 构建 Bootstrap TIPA (RootHide)
 on:
-  workflow_dispatch:  # 允许手动触发（提交代码时不自动构建）
+  workflow_dispatch:
   push:
-    branches: [main]   # 可选：推代码到 main 分支时自动构建
+    branches: [main]
 
 jobs:
   build:
-    runs-on: macos-14  # 使用 macOS 14（Sonoma）运行环境（内置 Xcode 15+）
+    runs-on: macos-14
     steps:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
         with:
-          submodules: recursive  # 拉取子模块（Theos 依赖）
+          submodules: recursive
+
+      - name: 补全 basebin 子模块并编译
+        run: |
+          cd $GITHUB_WORKSPACE
+          git submodule init basebin
+          git submodule update --recursive basebin
+          # 编译 basebin 生成静态库
+          cd basebin/common
+          make clean && make ARCHS=arm64
+          cd $GITHUB_WORKSPACE
+
+      - name: 修复 XPC 模块重定义
+        run: |
+          # 修改 module.modulemap 中的 XPC 模块名为 CustomXPC
+          sed -i '' 's/module XPC/module CustomXPC/g' $GITHUB_WORKSPACE/basebin/common/xpc/module.modulemap
 
       - name: 安装依赖（Theos/ldid）
         run: |
-          # 安装 Homebrew（GitHub macOS 环境已预装，这里做校验）
-          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
-          
-          # 卸载可能有问题的 ldid（若已安装）
           brew uninstall --force ldid || true
-          # 安装 RootHide 适配的 ldid 预编译版（替代 Homebrew 版本，解决兼容性）
           curl -LO https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid-macos-x86_64
           chmod +x ldid-macos-x86_64
           sudo mv ldid-macos-x86_64 /usr/local/bin/ldid
-          
-          # 克隆 RootHide 适配版 Theos（核心编译工具）
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
-          
-          # 配置 Theos 环境变量
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
-          
-          # 指定 Xcode 路径（GitHub 环境已预装 Xcode）
           sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          
-          # 验证依赖是否安装成功（兼容式校验）
+          # 验证依赖
           xcodebuild -version
-          # 检查 ldid 是否存在，替代不兼容的 --version 参数
           if command -v ldid &> /dev/null; then
             echo "ldid 安装成功"
           else
             echo "ldid 安装失败"
             exit 1
           fi
-          echo "Theos 路径：$HOME/theos"
 
       - name: 编译并打包 TIPA
         run: |
-          # 进入仓库根目录执行构建
           cd $GITHUB_WORKSPACE
-          make clean  # 清理旧构建产物
-          make package  # 编译 + 签名 + 生成 .tipa
+          make clean
+          # 传递工程配置参数，强制禁用签名
+          make package \
+            Bootstrap_XCODEFLAGS="IPHONEOS_DEPLOYMENT_TARGET=15.0 CODE_SIGN_IDENTITY='' AD_HOC_CODE_SIGNING_ALLOWED=YES CODE_SIGNING_ALLOWED=NO"
 
       - name: 上传 TIPA 产物
         uses: actions/upload-artifact@v4
         with:
           name: Bootstrap-TIPA
-          path: ${{ github.workspace }}/packages/Bootstrap.tipa  # 指向生成的 .tipa 文件路径
-          retention-days: 90  # 产物保留 90 天（默认也是 90 天）
+          path: ${{ github.workspace }}/packages/Bootstrap.tipa
+          retention-days: 90
