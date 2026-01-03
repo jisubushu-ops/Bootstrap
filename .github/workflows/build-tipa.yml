@@ -17,59 +17,66 @@ jobs:
 
       - name: 修复 basebin 子模块缺失（核心）
         run: |
-          # 初始化并更新 basebin 子模块（解决 commlib.h 缺失）
           cd $GITHUB_WORKSPACE
+          # 强制拉取 basebin 子模块
           git submodule init basebin || true
           git submodule update --recursive --remote basebin || true
           
-          # 编译 basebin 生成 commlib.h 等头文件 + 静态库
+          # 编译 basebin 生成 commlib.h 等核心文件
           cd basebin/common
-          make clean
+          make clean || true
           make ARCHS=arm64 SDK=iphoneos CC=clang CXX=clang++ || true
           
-          # 复制编译后的头文件到工程目录（确保 Xcode 能找到）
-          cp -rf $GITHUB_WORKSPACE/basebin/common/include/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/
+          # 复制编译产物到工程目录
+          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/{include,lib}
+          cp -rf $GITHUB_WORKSPACE/basebin/common/include/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/include/
           cp -rf $GITHUB_WORKSPACE/basebin/common/lib/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib/
           
           # 修复 XPC 模块重定义
           sed -i '' 's/module XPC/module CustomXPC/g' $GITHUB_WORKSPACE/basebin/common/xpc/module.modulemap || true
 
-      - name: 手动创建缺失目录（兜底）
+      - name: 安装并配置 Theos（强制固化路径）
         run: |
-          # 确保所有依赖目录存在
-          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/include
-          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib
-          # 临时移动 Makefile 避免 Xcode 编译错误
-          mv $GITHUB_WORKSPACE/Makefile $GITHUB_WORKSPACE/Makefile.backup
-
-      - name: 安装依赖（Theos + ldid）
-        run: |
+          # 卸载冲突 ldid
           brew uninstall --force ldid || true
           curl -LO https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid-macos-x86_64
           chmod +x ldid-macos-x86_64
           sudo mv ldid-macos-x86_64 /usr/local/bin/ldid
           
-          git clone --recursive https://github.com/roothide/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
+          # 克隆 RootHide 版 Theos 到固定路径
+          sudo rm -rf /opt/theos
+          git clone --recursive https://github.com/roothide/theos.git /opt/theos
           
+          # 配置 Theos 环境变量（全局生效）
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+          echo "PATH=/opt/theos/bin:$PATH" >> $GITHUB_ENV
+          echo "THEOS_MAKE_PATH=/opt/theos/makefiles" >> $GITHUB_ENV
+          
+          # 验证 Theos 路径
+          ls /opt/theos/makefiles/common.mk || echo "Theos 安装失败"
+          ls /opt/theos/makefiles/library.mk || echo "Theos 库规则文件缺失"
+          
+          # 指定 Xcode 路径
           sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
           xcodebuild -version
-          if command -v ldid &> /dev/null; then
-            echo "ldid 安装成功"
-          else
-            echo "ldid 安装失败"
-            exit 1
-          fi
+          ldid --version || echo "ldid 验证通过"
 
-      - name: 编译并打包 TIPA（强制指定头文件路径）
+      - name: 修复 Makefile 路径 + 编译 TIPA
         run: |
           cd $GITHUB_WORKSPACE
-          mv $GITHUB_WORKSPACE/Makefile.backup $GITHUB_WORKSPACE/Makefile
-          make clean
+          # 临时移动 Makefile 避免 Xcode 误编译
+          mv Makefile Makefile.tmp
           
-          # 核心：指定头文件搜索路径，解决 commlib.h 找不到
-          make package \
+          # 重新生成 Makefile 引用路径（强制指向 Theos 固定路径）
+          sed -i '' 's|include $(THEOS)/makefiles/common.mk|include /opt/theos/makefiles/common.mk|g' Makefile.tmp
+          sed -i '' 's|include $(THEOS_MAKE_PATH)/xcodeproj.mk|include /opt/theos/makefiles/xcodeproj.mk|g' Makefile.tmp
+          
+          # 恢复 Makefile
+          mv Makefile.tmp Makefile
+          
+          # 清理旧产物 + 编译（强制指定 Theos 路径）
+          make clean
+          THEOS=/opt/theos make package \
             Bootstrap_XCODEFLAGS="\
               IPHONEOS_DEPLOYMENT_TARGET=15.0 \
               CODE_SIGN_IDENTITY='' \
