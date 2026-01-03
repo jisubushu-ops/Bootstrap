@@ -18,8 +18,12 @@ jobs:
           # 安装 Homebrew（GitHub macOS 环境已预装，这里做校验）
           /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
           
-          # 安装 ldid（越狱应用签名工具）
-          brew install ldid
+          # 卸载可能有问题的 ldid（若已安装）
+          brew uninstall --force ldid || true
+          # 安装 RootHide 适配的 ldid 预编译版（替代 Homebrew 版本，解决兼容性）
+          curl -LO https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid-macos-x86_64
+          chmod +x ldid-macos-x86_64
+          sudo mv ldid-macos-x86_64 /usr/local/bin/ldid
           
           # 克隆 RootHide 适配版 Theos（核心编译工具）
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
@@ -31,9 +35,15 @@ jobs:
           # 指定 Xcode 路径（GitHub 环境已预装 Xcode）
           sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
           
-          # 验证依赖是否安装成功
+          # 验证依赖是否安装成功（兼容式校验）
           xcodebuild -version
-          ldid --version
+          # 检查 ldid 是否存在，替代不兼容的 --version 参数
+          if command -v ldid &> /dev/null; then
+            echo "ldid 安装成功"
+          else
+            echo "ldid 安装失败"
+            exit 1
+          fi
           echo "Theos 路径：$HOME/theos"
 
       - name: 编译并打包 TIPA
