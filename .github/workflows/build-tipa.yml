@@ -14,59 +14,65 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: 安装 Theos 到用户目录（解决权限问题）
+      - name: 安装 Theos 到用户目录（解决权限）
         run: |
-          # 清理旧 Theos（用户目录可写）
           rm -rf $HOME/theos
-          # 克隆 RootHide Theos 到用户目录（无需 sudo）
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
           # 验证 Theos 核心文件
           if [ ! -f "$HOME/theos/makefiles/common.mk" ]; then
             echo "Theos 安装失败：common.mk 缺失"
             exit 1
           fi
-          if [ ! -f "$HOME/theos/makefiles/library.mk" ]; then
-            echo "Theos 安装失败：library.mk 缺失"
-            exit 1
-          fi
-          # 配置全局环境变量（绝对路径）
+          # 配置环境变量
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
           echo "THEOS_MAKE_PATH=$HOME/theos/makefiles" >> $GITHUB_ENV
 
-      - name: 安装 ldid + 配置 Xcode
+      - name: 安装依赖 + 配置 Xcode
         run: |
-          # 安装兼容版 ldid（无需 sudo 也可写入 /usr/local/bin）
+          # 安装 ldid 到 Theos 目录
           brew uninstall --force ldid || true
           curl -LO https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid-macos-x86_64
           chmod +x ldid-macos-x86_64
           mv ldid-macos-x86_64 $HOME/theos/bin/ldid
-          chmod +x $HOME/theos/bin/ldid
           # 指定 Xcode 路径
           sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          # 验证依赖
-          $HOME/theos/bin/ldid --version || echo "ldid 已安装"
-          xcodebuild -version
+          # 安装编译 basebin 所需的工具
+          brew install llvm || true
 
-      - name: 硬编码 Theos 路径到 Makefile（关键）
+      - name: 编译 basebin 生成 commlib.h（核心修复）
         run: |
           cd $GITHUB_WORKSPACE
-          # 备份原 Makefile
+          # 进入 basebin/common 目录编译
+          cd basebin/common
+          # 硬编码 Theos 路径编译 basebin（解决依赖）
+          THEOS=$HOME/theos make clean
+          THEOS=$HOME/theos make ARCHS=arm64 SDK=iphoneos CC=clang CXX=clang++
+          # 验证 commlib.h 是否生成
+          if [ ! -f "$GITHUB_WORKSPACE/basebin/common/include/commlib.h" ]; then
+            echo "basebin 编译失败：commlib.h 未生成"
+            exit 1
+          fi
+          # 复制生成的头文件/库到工程目录（Xcode 可搜索）
+          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/{include,lib}
+          cp -rf $GITHUB_WORKSPACE/basebin/common/include/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/include/
+          cp -rf $GITHUB_WORKSPACE/basebin/common/lib/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib/
+
+      - name: 修复 Makefile + XPC 模块
+        run: |
+          cd $GITHUB_WORKSPACE
+          # 硬编码 Theos 路径到 Makefile
           cp Makefile Makefile.bak
-          # 替换所有 Theos 路径为用户目录绝对路径
           sed -i '' "s|\$(THEOS)/makefiles/common.mk|$HOME/theos/makefiles/common.mk|g" Makefile
           sed -i '' "s|\$(THEOS_MAKE_PATH)/xcodeproj.mk|$HOME/theos/makefiles/xcodeproj.mk|g" Makefile
           # 修复 XPC 模块重定义
           sed -i '' 's/module XPC/module CustomXPC/g' basebin/common/xpc/module.modulemap || true
-          # 创建空目录兜底（避免路径缺失）
-          mkdir -p Bootstrap/basebin/common/{include,lib}
 
       - name: 编译并打包 TIPA
         run: |
           cd $GITHUB_WORKSPACE
-          # 清理旧产物
           make clean
-          # 强制指定 Theos 路径编译（绝对路径）
+          # 强制指定头文件搜索路径（确保 Xcode 找到 commlib.h）
           THEOS=$HOME/theos make package \
             ARCHS=arm64 \
             TARGET=iphone:17.5:15.0 \
@@ -76,7 +82,16 @@ jobs:
               AD_HOC_CODE_SIGNING_ALLOWED=YES \
               CODE_SIGNING_ALLOWED=NO \
               EXCLUDED_SOURCE_FILE_NAMES='Makefile' \
-              USER_HEADER_SEARCH_PATHS='$(PROJECT_DIR)/basebin/common $(PROJECT_DIR)/Bootstrap/basebin/common' \
+              # 核心：添加所有可能的头文件搜索路径
+              USER_HEADER_SEARCH_PATHS='\
+                $(PROJECT_DIR)/basebin/common/include \
+                $(PROJECT_DIR)/Bootstrap/basebin/common/include \
+                $(SRCROOT)/basebin/common/include \
+                $(SRCROOT)/Bootstrap/basebin/common/include \
+              ' \
+              # 修复 Swift 桥接头文件编译
+              SWIFT_INCLUDE_PATHS='$(PROJECT_DIR)/basebin/common/include' \
+              HEADER_SEARCH_PATHS='$(PROJECT_DIR)/basebin/common/include' \
             "
 
       - name: 上传 TIPA 产物
