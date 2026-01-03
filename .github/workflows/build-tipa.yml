@@ -1,48 +1,59 @@
 name: 构建 Bootstrap TIPA (RootHide)
 on:
-  workflow_dispatch:  # 仅手动触发
+  workflow_dispatch:
   push:
-    branches: [main]   # 可选自动触发
+    branches: [main]
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: 拉取仓库代码（强制递归子模块）
+      - name: 拉取仓库代码（强制递归所有子模块）
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0  # 拉取完整提交历史，避免子模块缺失
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: 手动创建 basebin 目录 + 规避 Makefile 编译错误
+      - name: 修复 basebin 子模块缺失（核心）
         run: |
-          # 1. 强制创建缺失的 basebin 目录（解决路径不存在）
-          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin
-          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib
-          # 2. 临时移动 Makefile 到非源码目录（避免 Xcode 识别为编译文件）
-          mv $GITHUB_WORKSPACE/Makefile $GITHUB_WORKSPACE/Makefile.backup
-          # 3. 创建空的静态库文件（避免 libcommon.a/prepare.a 缺失）
-          touch $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib/libcommon.a
-          touch $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib/prepare.a
-          # 4. 修复 XPC 模块重定义（核心）
+          # 初始化并更新 basebin 子模块（解决 commlib.h 缺失）
+          cd $GITHUB_WORKSPACE
+          git submodule init basebin || true
+          git submodule update --recursive --remote basebin || true
+          
+          # 编译 basebin 生成 commlib.h 等头文件 + 静态库
+          cd basebin/common
+          make clean
+          make ARCHS=arm64 SDK=iphoneos CC=clang CXX=clang++ || true
+          
+          # 复制编译后的头文件到工程目录（确保 Xcode 能找到）
+          cp -rf $GITHUB_WORKSPACE/basebin/common/include/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/
+          cp -rf $GITHUB_WORKSPACE/basebin/common/lib/* $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib/
+          
+          # 修复 XPC 模块重定义
           sed -i '' 's/module XPC/module CustomXPC/g' $GITHUB_WORKSPACE/basebin/common/xpc/module.modulemap || true
 
-      - name: 安装依赖（Theos + 兼容版 ldid）
+      - name: 手动创建缺失目录（兜底）
         run: |
-          # 卸载冲突的 ldid
+          # 确保所有依赖目录存在
+          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/include
+          mkdir -p $GITHUB_WORKSPACE/Bootstrap/basebin/common/lib
+          # 临时移动 Makefile 避免 Xcode 编译错误
+          mv $GITHUB_WORKSPACE/Makefile $GITHUB_WORKSPACE/Makefile.backup
+
+      - name: 安装依赖（Theos + ldid）
+        run: |
           brew uninstall --force ldid || true
-          # 安装 RootHide 适配的 ldid
           curl -LO https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid-macos-x86_64
           chmod +x ldid-macos-x86_64
           sudo mv ldid-macos-x86_64 /usr/local/bin/ldid
-          # 克隆 RootHide 版 Theos
+          
           git clone --recursive https://github.com/roothide/theos.git $HOME/theos
-          # 配置环境变量
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
-          # 指定 Xcode 路径
+          
           sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
-          # 验证依赖
           xcodebuild -version
           if command -v ldid &> /dev/null; then
             echo "ldid 安装成功"
@@ -51,14 +62,13 @@ jobs:
             exit 1
           fi
 
-      - name: 编译并打包 TIPA（核心修复编译参数）
+      - name: 编译并打包 TIPA（强制指定头文件路径）
         run: |
           cd $GITHUB_WORKSPACE
-          # 恢复 Makefile（供 Theos 使用）
           mv $GITHUB_WORKSPACE/Makefile.backup $GITHUB_WORKSPACE/Makefile
-          # 清理旧产物
           make clean
-          # 强制指定 Xcode 编译参数，跳过非法文件 + 禁用签名 + 适配路径
+          
+          # 核心：指定头文件搜索路径，解决 commlib.h 找不到
           make package \
             Bootstrap_XCODEFLAGS="\
               IPHONEOS_DEPLOYMENT_TARGET=15.0 \
@@ -66,8 +76,9 @@ jobs:
               AD_HOC_CODE_SIGNING_ALLOWED=YES \
               CODE_SIGNING_ALLOWED=NO \
               EXCLUDED_SOURCE_FILE_NAMES='Makefile' \
-              LIBRARY_SEARCH_PATHS='$(PROJECT_DIR)/Bootstrap/basebin/common/lib' \
-              USER_HEADER_SEARCH_PATHS='$(PROJECT_DIR)/Bootstrap/basebin/common' \
+              USER_HEADER_SEARCH_PATHS='$(PROJECT_DIR)/basebin/common/include $(PROJECT_DIR)/Bootstrap/basebin/common/include' \
+              LIBRARY_SEARCH_PATHS='$(PROJECT_DIR)/basebin/common/lib $(PROJECT_DIR)/Bootstrap/basebin/common/lib' \
+              SWIFT_INCLUDE_PATHS='$(PROJECT_DIR)/basebin/common/include' \
             "
 
       - name: 上传 TIPA 产物
