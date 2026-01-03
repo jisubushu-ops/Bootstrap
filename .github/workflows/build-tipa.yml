@@ -1,0 +1,51 @@
+name: 构建 Bootstrap TIPA (RootHide)
+on:
+  workflow_dispatch:  # 允许手动触发（提交代码时不自动构建）
+  push:
+    branches: [main]   # 可选：推代码到 main 分支时自动构建
+
+jobs:
+  build:
+    runs-on: macos-14  # 使用 macOS 14（Sonoma）运行环境（内置 Xcode 15+）
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # 拉取子模块（Theos 依赖）
+
+      - name: 安装依赖（Theos/ldid）
+        run: |
+          # 安装 Homebrew（GitHub macOS 环境已预装，这里做校验）
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || true
+          
+          # 安装 ldid（越狱应用签名工具）
+          brew install ldid
+          
+          # 克隆 RootHide 适配版 Theos（核心编译工具）
+          git clone --recursive https://github.com/roothide/theos.git $HOME/theos
+          
+          # 配置 Theos 环境变量
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "PATH=$HOME/theos/bin:$PATH" >> $GITHUB_ENV
+          
+          # 指定 Xcode 路径（GitHub 环境已预装 Xcode）
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          
+          # 验证依赖是否安装成功
+          xcodebuild -version
+          ldid --version
+          echo "Theos 路径：$HOME/theos"
+
+      - name: 编译并打包 TIPA
+        run: |
+          # 进入仓库根目录执行构建
+          cd $GITHUB_WORKSPACE
+          make clean  # 清理旧构建产物
+          make package  # 编译 + 签名 + 生成 .tipa
+
+      - name: 上传 TIPA 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bootstrap-TIPA
+          path: ${{ github.workspace }}/packages/Bootstrap.tipa  # 指向生成的 .tipa 文件路径
+          retention-days: 90  # 产物保留 90 天（默认也是 90 天）
